@@ -22,16 +22,17 @@ def main():
 
     parallelism = 2
     clusters = 2
-    dimensions = 4
+    dimensions = 2
     number_of_iterations = 10
 
     # TEST Crentroids
     # centroids = GlobalCentroids(2, 2)
     # centroids.random_init(4)
     # print(centroids.get_centroids())
-    # centroids.update([[1, 1, 1, 1], [2, 2, 2, 2]], [2, 2])
-    # centroids.update([[2, 2, 2, 2], [1, 1, 1, 1]], [2, 2])
+    # centroids.update([[1.2, 1, 1, 1], [2, 2, 2, 2]], [2, 2])
+    # centroids.update([[2, 2, 2, 2.2], [1, 1, 1, 1]], [2, 2])
     # print(centroids.get_centroids())
+    # return
 
     # TEST Delta
     # delta = GlobalDelta(2)
@@ -40,6 +41,7 @@ def main():
     # delta.update(1, 2)
     # delta.update(0, 2)
     # print(delta.get_delta())
+    # return
 
     # Initialize global objects
     centroids = GlobalCentroids(clusters, parallelism)
@@ -49,10 +51,12 @@ def main():
 
     worker_stats = []     # in seconds
 
+    threads = []
+
     def local_run(w_id):
         worker_breakdown = train(w_id, parallelism * DATAPOINTS_PER_FILE,
-                                  dimensions, parallelism, clusters,
-                                  number_of_iterations, False, redis_conf)
+                                 dimensions, parallelism, clusters,
+                                 number_of_iterations, False, redis_conf)
         worker_stats.append(worker_breakdown)
 
     def lambda_run(w_id):
@@ -67,7 +71,8 @@ def main():
         task = local_run
     else:
         task = lambda_run
-    threads = [threading.Thread(target=task) for _ in range(parallelism)]
+    threads = [threading.Thread(target=task, args=(i,))
+               for i in range(parallelism)]
 
     start_time = time.time()
     [t.start() for t in threads]
@@ -76,7 +81,7 @@ def main():
     # Parse results
     times = []
     for b in worker_stats:
-        # Iterations time is second breakdown and last 
+        # Iterations time is second breakdown and last
         times.append(b[-1]-b[2])
 
     avg_time = sum(times) / len(times)
@@ -171,9 +176,8 @@ class GlobalCentroids(object):
                 redis.call("HMSET", centroidTemp, unpack(a))
                 redis.call("SET", sizeTemp, 0)
             end
-            local sum
             for i = 0,n-1 do
-                redis.call("HINCRBY", centroidTemp, tostring(i), ARGV[3+i])
+                redis.call("HINCRBYFLOAT", centroidTemp, tostring(i), tostring(ARGV[3+i]))
             end
             local size = redis.call("INCRBY", sizeTemp, ARGV[1])
             count = redis.call("INCR", counterKey)
@@ -192,13 +196,15 @@ class GlobalCentroids(object):
             return
         """
         centroid_k = self.centroid_key(cluster_id)
+        coordinates = list(map(lambda x: str(x), coordinates))
         self.red.eval(lua_script, 4, centroid_k, centroid_k+"_c",
                       centroid_k+"_temp", centroid_k+"_st",
-                      size, self.parallelism, *coordinates)
+                      size, self.parallelism, b"1.2", *coordinates)
 
     def get_centroids(self):
-        return [self.red.lrange(self.centroid_key(k), 0, -1)
-                for k in range(self.num_clusters)]
+        b = [self.red.lrange(self.centroid_key(k), 0, -1)
+             for k in range(self.num_clusters)]
+        return list(map(lambda point: list(map(lambda v: float(v), point)), b))
 
 
 class GlobalDelta(object):
@@ -214,7 +220,7 @@ class GlobalDelta(object):
         self.red.set("delta_st", 0)
 
     def get_delta(self):
-        return self.red.get("delta")
+        return float(self.red.get("delta"))
 
     def update(self, delta, num_points):
         lua_script = """
@@ -223,9 +229,8 @@ class GlobalDelta(object):
             local deltaTemp = KEYS[3]
             local npointsTemp = KEYS[4]
 
-            local tmpDelta = redis.call("INCRBY", deltaTemp, ARGV[1])
+            local tmpDelta = redis.call("INCRBY", deltaTemp, tostring(ARGV[1]))
             local tmpPoints = redis.call("INCRBY", npointsTemp, ARGV[2])
-
 
             local count = redis.call("INCR", counterKey)
             if tonumber(count) == tonumber(ARGV[3]) then
@@ -251,7 +256,7 @@ class Worker(object):
         self.num_dimensions = dimensions
         self.num_clusters = clusters
         self.max_iterations = max_iters
-        self.partition_points = data_points / parallelism
+        self.partition_points = int(data_points / parallelism)
         self.parallelism = parallelism
         self.use_lower_bound_opt = use_lower_bound_opt
         self.start_partition = self.partition_points * self.worker_id
@@ -318,7 +323,7 @@ class Worker(object):
             breakdown.append(time.time())
             global_delta_val = self.global_delta.get_delta()
             print(f"DEBUG: Finished iteration {iter_count} of worker "
-                  f"{self.worker_id} [GlobalDeltaVal={global_delta_val}")
+                  f"{self.worker_id} [GlobalDeltaVal={global_delta_val}]")
             iter_count += 1
         breakdown.append(time.time())
         iteration_time = breakdown[-1] - init_time
@@ -326,7 +331,10 @@ class Worker(object):
         return breakdown
 
     def load_dataset(self):
-        pass  # TODO
+        # TODO pupulate self.local_partition
+        import random
+        self.local_partition = [[random.gauss(0, 1) for _ in range(self.num_dimensions)]
+                                for _ in range(self.partition_points)]
 
     def compute_correct_centroids_norms(self):
         raise NotImplementedError()  # TODO
