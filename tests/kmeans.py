@@ -1,20 +1,25 @@
+import boto3
 import time
 
 import khan
 
 THRESHOLD = 0.00001
 DATAPOINTS_PER_FILE = 695_866  # dataset 100 dimensions
+DIMENSIONS = 100
 
 
 def main():
+    khan.aws.deploy_handler([__file__])
+    return
+
     import threading
-    local = True
+    local = False
 
     redispass = None
-    # redispass = "@4iAgH+WMZ92pgE-"
+    redispass = "@4iAgH+WMZ92pgE-"
     redis_conf = {
-        'host': 'localhost',
-        # 'host': '35.175.24.57',
+        # 'host': 'localhost',
+        'host': '35.175.24.57',
         'port': 6379,
         'password': redispass
     }
@@ -22,7 +27,7 @@ def main():
 
     parallelism = 2
     clusters = 2
-    dimensions = 2
+    dimensions = DIMENSIONS
     number_of_iterations = 10
 
     # TEST Crentroids
@@ -87,6 +92,10 @@ def main():
     avg_time = sum(times) / len(times)
     print(f"Total k-means time: {time.time() - start_time} s")
     print(f"Average iterations time: {avg_time} s")
+
+    with open('time_break.txt', 'w') as f:
+        for item in worker_stats:
+            f.write(f"{item}\n")
 
 
 def train(worker_id, data_points, dimensions, parallelism,
@@ -307,11 +316,11 @@ class Worker(object):
             self.local_sizes = [0 for _ in range(self.num_clusters)]
             self.local_centroids = [[0 for _ in range(self.num_dimensions)]
                                     for _ in range(self.num_clusters)]
-
+            print("Structures reset")
             # Compute phase, returns number of local membership modifications
             delta = self.compute_clusters()
             breakdown.append(time.time())
-
+            print("Compute finished")
             # Update global objects
             self.global_delta.update(delta, len(self.local_partition))
             self.global_centroids.update(
@@ -332,9 +341,12 @@ class Worker(object):
 
     def load_dataset(self):
         # TODO pupulate self.local_partition
-        import random
-        self.local_partition = [[random.gauss(0, 1) for _ in range(self.num_dimensions)]
-                                for _ in range(self.partition_points)]
+        # import random
+        # self.local_partition = [[random.gauss(0, 1) for _ in range(self.num_dimensions)]
+        #                         for _ in range(self.partition_points)]
+        self.local_partition = S3Reader().get_points(self.worker_id,
+                                                     self.partition_points,
+                                                     self.num_dimensions)
 
     def compute_correct_centroids_norms(self):
         raise NotImplementedError()  # TODO
@@ -350,11 +362,11 @@ class Worker(object):
         cluster = 0
         min_dis = None
         for k in range(self.num_clusters):
-            if self.use_lower_bound_opt:
-                # Since `\|a - b\| \geq |\|a\| - \|b\||`, we can use this
-                # lower bound to avoid unnecessary distance computation.
-                # TODO
-                pass
+            # if self.use_lower_bound_opt:
+            #     # Since `\|a - b\| \geq |\|a\| - \|b\||`, we can use this
+            #     # lower bound to avoid unnecessary distance computation.
+            #     # TODO
+            #     pass
 
             distance = self.distance(self.local_partition[point-self.start_partition],
                                      self.correct_centroids[k])
@@ -368,7 +380,7 @@ class Worker(object):
         delta = 0
 
         for i in range(self.start_partition, self.end_partition):
-            cluster = self.find_nearest_cluster(i)
+            cluster = self.find_nearest_cluster(i)          # point*clusters * dims
 
             # For every dimension, add new point to local centroid
             for j in range(self.num_dimensions):
@@ -385,5 +397,42 @@ class Worker(object):
         return delta
 
 
+class S3Reader(object):
+    S3_BUCKET = "gparis-kmeans-dataset"
+
+    def get_points(self, worker_id, partition_points, num_dimensions):
+        self.file_name = "dataset-100GB-100d/part-" + "{:05}".format(worker_id)
+        print(f"s3BUCKET::::::: {self.S3_BUCKET}")
+
+        s3 = boto3.resource('s3')
+        # s3 = boto3.resource('s3', aws_access_key_id='xxx', aws_secret_access_key='xxx')
+        obj = s3.Object(self.S3_BUCKET, self.file_name).get()['Body']
+
+        points = []
+
+        for line in obj.iter_lines():
+            # print(line.decode("utf-8"))
+            dims = (line.decode("utf-8")).split(',')
+            points.append(list(map(lambda x: float(x), dims)))
+            # return
+        obj.close()
+        print(f"Dataset loaded from file {self.file_name}")
+        print(f"First point: {points[0][0]}  "
+              f"Last point: {points[partition_points-1][num_dimensions-1]}")
+        print(f"Points loaded: {len(points)}")
+
+        for p, point in enumerate(points):
+            if len(point) != num_dimensions:
+                print(f"Worker {worker_id} Reading ERROR: point {p} "
+                      f"only has {len(point)} dimensions!")
+        return points
+
+
+def test_s3():
+    s3 = S3Reader()
+    s3.get_points(0, DATAPOINTS_PER_FILE, DIMENSIONS)
+
+
 if __name__ == "__main__":
     main()
+    # test_s3()

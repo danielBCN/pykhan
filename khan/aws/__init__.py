@@ -37,7 +37,7 @@ class LambdaInvoker(object):
         from .config import LAMBDA_NAME, AWS_REGION
         self.session = botocore.session.get_session()
         self.config = botocore.config.Config(max_pool_connections=200,
-                                             read_timeout=300)
+                                             read_timeout=600)
 
         self.region_name = AWS_REGION
         self.lambda_function_name = LAMBDA_NAME
