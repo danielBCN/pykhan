@@ -1,5 +1,6 @@
 import boto3
 import time
+import numpy as np
 
 import khan
 
@@ -9,24 +10,24 @@ DIMENSIONS = 100
 
 
 def main():
-    khan.aws.deploy_handler([__file__])
-    return
+    # khan.aws.deploy_handler([__file__])
+    # return
 
     import threading
-    local = False
+    local = True
 
     redispass = None
-    redispass = "@4iAgH+WMZ92pgE-"
+    # redispass = "@4iAgH+WMZ92pgE-"
     redis_conf = {
-        # 'host': 'localhost',
-        'host': '35.175.24.57',
+        'host': 'localhost',
+        # 'host': '35.175.24.57',
         'port': 6379,
         'password': redispass
     }
     khan.synch.red.RedisConn.set_up(**redis_conf)
 
-    parallelism = 2
-    clusters = 2
+    parallelism = 1
+    clusters = 25
     dimensions = DIMENSIONS
     number_of_iterations = 10
 
@@ -130,7 +131,7 @@ class GlobalCentroids(object):
 
     def update(self, coordinates, sizes):
         for k in range(self.num_clusters):
-            self._update_centroid(k, coordinates[k], sizes[k])
+            self._update_centroid(k, coordinates[k].tolist(), int(sizes[k]))
 
     def _update_centroid(self, cluster_id, coordinates, size):
         # lua_script = """
@@ -213,7 +214,7 @@ class GlobalCentroids(object):
     def get_centroids(self):
         b = [self.red.lrange(self.centroid_key(k), 0, -1)
              for k in range(self.num_clusters)]
-        return list(map(lambda point: list(map(lambda v: float(v), point)), b))
+        return np.array(list(map(lambda point: list(map(lambda v: float(v), point)), b)))
 
 
 class GlobalDelta(object):
@@ -271,11 +272,11 @@ class Worker(object):
         self.start_partition = self.partition_points * self.worker_id
         self.end_partition = self.partition_points * (worker_id + 1)
 
-        self.correct_centroids = []
-        self.local_partition = []
-        self.local_centroids = []
-        self.local_sizes = []
-        self.local_membership = []
+        self.correct_centroids = None
+        self.local_partition = None
+        self.local_centroids = None
+        self.local_sizes = None
+        self.local_membership = None
 
         self.barrier = khan.synch.red.RedisBarrier("barrier", self.parallelism)
         self.global_delta = GlobalDelta(self.parallelism)
@@ -293,8 +294,10 @@ class Worker(object):
         breakdown.append(time.time())
 
         self.load_dataset()
+        print(self.local_partition)
 
-        self.local_membership = [0 for _ in range(len(self.local_partition))]
+        # self.local_membership = [0 for _ in range(len(self.local_partition))]
+        self.local_membership = np.zeros([self.local_partition.shape[0]])
 
         # barrier before starting iterations, to avoid different execution times
         self.barrier.wait()
@@ -308,21 +311,26 @@ class Worker(object):
 
             # Get local copy of global objects
             self.correct_centroids = self.global_centroids.get_centroids()
-            if self.use_lower_bound_opt:
-                self.compute_correct_centroids_norms()
+            # if self.use_lower_bound_opt:
+            #     self.compute_correct_centroids_norms()
             breakdown.append(time.time())
 
             # Reset data structures that will be used in this iteration
-            self.local_sizes = [0 for _ in range(self.num_clusters)]
-            self.local_centroids = [[0 for _ in range(self.num_dimensions)]
-                                    for _ in range(self.num_clusters)]
+            # self.local_sizes = [0 for _ in range(self.num_clusters)]
+            self.local_sizes = np.zeros([self.num_clusters])
+            # self.local_centroids = [[0 for _ in range(self.num_dimensions)]
+            #                         for _ in range(self.num_clusters)]
+            self.local_centroids = np.zeros(
+                [self.num_clusters, self.num_dimensions])
             print("Structures reset")
+
             # Compute phase, returns number of local membership modifications
             delta = self.compute_clusters()
             breakdown.append(time.time())
-            print("Compute finished")
+            print(f"Compute finished in {breakdown[-1]-breakdown[-2]} s")
+
             # Update global objects
-            self.global_delta.update(delta, len(self.local_partition))
+            self.global_delta.update(delta, self.local_partition.shape[0])
             self.global_centroids.update(
                 self.local_centroids, self.local_sizes)
 
@@ -340,23 +348,23 @@ class Worker(object):
         return breakdown
 
     def load_dataset(self):
-        # TODO pupulate self.local_partition
-        # import random
-        # self.local_partition = [[random.gauss(0, 1) for _ in range(self.num_dimensions)]
-        #                         for _ in range(self.partition_points)]
-        self.local_partition = S3Reader().get_points(self.worker_id,
-                                                     self.partition_points,
-                                                     self.num_dimensions)
+        import random
+        self.local_partition = np.random.randn(self.partition_points,
+                                               self.num_dimensions)
+        # self.local_partition = S3Reader().get_points(self.worker_id,
+        #                                              self.partition_points,
+        #                                              self.num_dimensions)
 
     def compute_correct_centroids_norms(self):
         raise NotImplementedError()  # TODO
 
     def distance(self, point, centroid):
         """Euclidean squared distance."""
-        distance = 0.0
-        for i in range(self.num_dimensions):
-            distance += (point[i] - centroid[i]) * (point[i] - centroid[i])
-        return distance
+        # distance = 0.0
+        # for i in range(self.num_dimensions):
+        #     distance += (point[i] - centroid[i]) * (point[i] - centroid[i])
+        # return distance
+        return np.linalg.norm(point - centroid)
 
     def find_nearest_cluster(self, point):
         cluster = 0
@@ -379,20 +387,26 @@ class Worker(object):
     def compute_clusters(self):
         delta = 0
 
-        for i in range(self.start_partition, self.end_partition):
-            cluster = self.find_nearest_cluster(i)          # point*clusters * dims
+        # for i in range(self.start_partition, self.end_partition):
+        for i in range(0, self.end_partition-self.start_partition):
+            # cluster = self.find_nearest_cluster(i)
+            # Complexity: point*clusters * dims
+            point = self.local_partition[i]
+            dists = ((point - self.correct_centroids) ** 2).sum(axis=1)
+            cluster = np.argmin(dists)
 
             # For every dimension, add new point to local centroid
-            for j in range(self.num_dimensions):
-                self.local_centroids[cluster][j] += self.local_partition[i -
-                                                                         self.start_partition][j]
+            # for j in range(self.num_dimensions):
+            #     self.local_centroids[cluster][j] += self.local_partition[i -
+            #                                                              self.start_partition][j]
+            self.local_centroids[cluster] += point
 
             self.local_sizes[cluster] += 1
 
             # If now point is a member of a different cluster
-            if self.local_membership[i-self.start_partition] != cluster:
+            if self.local_membership[i] != cluster:
                 delta += 1
-                self.local_membership[i-self.start_partition] = cluster
+                self.local_membership[i] = cluster
 
         return delta
 
@@ -408,18 +422,20 @@ class S3Reader(object):
         # s3 = boto3.resource('s3', aws_access_key_id='xxx', aws_secret_access_key='xxx')
         obj = s3.Object(self.S3_BUCKET, self.file_name).get()['Body']
 
-        points = []
+        points = np.zeros([partition_points, num_dimensions])
 
+        lines = 0
         for line in obj.iter_lines():
-            # print(line.decode("utf-8"))
             dims = (line.decode("utf-8")).split(',')
-            points.append(list(map(lambda x: float(x), dims)))
-            # return
+            # points.append(list(map(lambda x: float(x), dims)))
+            points[lines] = np.array(list(map(lambda x: float(x), dims)))
+            lines += 1
+
         obj.close()
         print(f"Dataset loaded from file {self.file_name}")
         print(f"First point: {points[0][0]}  "
               f"Last point: {points[partition_points-1][num_dimensions-1]}")
-        print(f"Points loaded: {len(points)}")
+        print(f"Points loaded: {points.shape[0]}")
 
         for p, point in enumerate(points):
             if len(point) != num_dimensions:
@@ -436,3 +452,28 @@ def test_s3():
 if __name__ == "__main__":
     main()
     # test_s3()
+
+    # point = [3, 2, 1]
+    # clusters = [[1, 2, 3],
+    #             [1, 3, 2],
+    #             [3, 2, 1]]
+
+    # distances = []
+    # for k in clusters:
+    #     dist = 0.0
+    #     for d in range(3):
+    #         dist += (point[d]-k[d]) * (point[d]-k[d])
+    #     distances.append(dist)
+    # print(distances)
+
+    # point = np.array([3, 2, 1])
+    # print(f"Point: {point}")
+
+    # clusters = np.array([[1, 2, 3],
+    #                      [1, 3, 2],
+    #                      [3, 2, 1]])
+
+    # distances = ((point - clusters)**2).sum(axis=1)
+
+    # print(distances)
+    # print(np.argmin(distances))
