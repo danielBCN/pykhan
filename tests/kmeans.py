@@ -209,7 +209,7 @@ class GlobalCentroids(object):
         coordinates = list(map(lambda x: str(x), coordinates))
         self.red.eval(lua_script, 4, centroid_k, centroid_k+"_c",
                       centroid_k+"_temp", centroid_k+"_st",
-                      size, self.parallelism, b"1.2", *coordinates)
+                      size, self.parallelism, *coordinates)
 
     def get_centroids(self):
         b = [self.red.lrange(self.centroid_key(k), 0, -1)
